@@ -141,6 +141,10 @@ def add_battery_durations(
     spec_cap_df = pd.read_csv(
         os.path.join(csv_location, f"{subscenario_id}_" f"{subscenario_name}.csv")
     )
+    # DuckDB 1.4.0 doesn't recognize pandas 2.x StringDtype
+    for col in spec_cap_df.columns:
+        if pd.api.types.is_string_dtype(spec_cap_df[col]):
+            spec_cap_df[col] = spec_cap_df[col].astype(object)
 
     spec_cap_updated_df = duckdb_conn.sql(
         """CREATE TABLE spec_cap_table AS SELECT * FROM spec_cap_df;"""
@@ -162,6 +166,9 @@ def add_battery_durations(
             ;
         """
         relevant_projects_df = pd.read_sql(sql, conn)
+        for col in relevant_projects_df.columns:
+            if pd.api.types.is_string_dtype(relevant_projects_df[col]):
+                relevant_projects_df[col] = relevant_projects_df[col].astype(object)
 
         if not relevant_projects_df.empty:
             spec_cap_updated_df = duckdb_conn.sql(f"""

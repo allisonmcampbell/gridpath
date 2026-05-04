@@ -6,12 +6,14 @@ public energy data, processes it into GridPath's input format, builds a
 scenario database, and solves a multi-iteration optimization that produces
 reliability metrics (LOLE, LOLH, EUE).
 
-The e2e pipeline creates two scenarios:
+The e2e pipeline creates three scenarios:
 
+- **ra_toolkit_e2e_test** — quick validation run: 2 weather years (2015, 2019)
+  × 2 hydro years (2015, 2019) = 4 iterations. Start here.
+- **ra_toolkit_e2e_sync** — full synchronized run: 14 weather years (2007–2020)
+  × 2 hydro years (2015, 2019) = 28 iterations
 - **ra_toolkit_e2e_monte_carlo** — stochastic weather draws with Monte Carlo
   availability iterations
-- **ra_toolkit_e2e_sync** — synchronized weather years (2007-2020) convolved
-  with hydro years and availability iterations (28 subproblems total)
 
 ## Data Flow Diagram
 
@@ -69,14 +71,30 @@ The e2e pipeline creates two scenarios:
 ## Prerequisites
 
 - **GridPath** installed in a conda/mamba environment with all dependencies
+  (`pip install -e .[coverage]` from the repo root)
 - **Python 3.11+** with pandas, pyomo, and solver interfaces
 - **Solver**: CBC (open-source, included with Pyomo) or a commercial solver
-  (Gurobi, CPLEX) for faster solves
+  (Gurobi, CPLEX) for faster solves. See [Solver Notes](#solver-notes) below.
 - **Disk space**: ~10 GB (PUDL download ~4 GB, raw data ~2 GB, scenario CSVs
   ~2 GB, database ~2 GB)
-- **RAM**: 2+ GB per subproblem during solve (CBC); less with commercial
-  solvers
+- **RAM**: ~18 GB per iteration during solve with Gurobi; may be higher with
+  CBC or other open-source solvers. See [Memory Management](#memory-management)
+  below for `--n_parallel_solve` guidance.
 - **Internet access** for steps 1 and 3 (data downloads)
+
+### Solver Notes
+
+**Gurobi** (recommended): ~6 min per iteration using barrier + crossover.
+Requires a license — free academic licenses are available at
+<https://www.gurobi.com/academia/academic-program-and-licenses/>. After
+installing, `gurobi_cl --version` should work from the command line.
+
+**CBC** (open-source default): Works out of the box with Pyomo. Significantly
+slower (~15-20 min per iteration) and may use more memory than Gurobi. Fine for
+validating the test scenario; consider Gurobi for the full 28-iteration run.
+
+**HiGHS** (open-source alternative): Supported by GridPath but not tested with
+this pipeline.
 
 ## Step-by-Step Commands
 
@@ -126,6 +144,21 @@ gridpath_pudl_to_gridpath_raw
 
 ---
 
+### Step 2b: Fix Raw Data Headers
+
+```bash
+cd db
+python postprocess_raw_data_headers.py
+```
+
+| | |
+|---|---|
+| **Inputs** | `./raw_data/ra_toolkit_load.csv`, `./raw_data/pudl_ra_toolkit_var_profiles.csv` |
+| **Outputs** | Same files with corrected column headers |
+| **Notes** | The PUDL extraction and RA Toolkit download produce CSVs with v2025 column names (`load_zone_unit`, `load_mw`, `cap_factor`). The v2026 data toolkit expects the renamed columns (`unit`, `value`). Safe to re-run — skips files that already have correct headers. |
+
+---
+
 ### Step 3: Download RA Toolkit Load and Hydro Data
 
 ```bash
@@ -164,6 +197,25 @@ gridpath_run_data_toolkit --settings_csv ../data_toolkit/ra_toolkit_e2e_settings
 | **Notes** | This is the longest step. Runs ~26 sub-steps sequentially. Variable generation profile creation is parallelizable (`n_parallel_projects` setting). To run a single sub-step: `gridpath_run_data_toolkit --settings_csv ... --single_step <step_name>`. |
 
 See [Data Toolkit Sub-Steps](#data-toolkit-sub-steps) below for the full list.
+
+---
+
+### Step 4b: Post-Processing
+
+```bash
+python postprocess_opchar.py
+# Expected: Fixed hydro=24, vargen=46, fuel=56
+
+python postprocess_fuel_prices.py
+# Expected: Fuel prices: 8640 -> 6480 (removed 2160)
+```
+
+| | |
+|---|---|
+| **Inputs** | `./csvs_ra_toolkit_e2e/project/opchar/1_ra_toolkit_e2e.csv` |
+| | `./csvs_ra_toolkit_e2e/fuels/fuel_prices/1_aeo2022.csv` |
+| **Outputs** | Same files, corrected in place |
+| **Notes** | Must be re-run every time step 4 regenerates the CSVs. `postprocess_opchar.py` fixes scenario ID mismatches (hydro ID 1→5, var gen ID 1→3) and nulls fuel references for projects without fuel files (biomass/nuclear). `postprocess_fuel_prices.py` deduplicates Oil fuel prices where multiple AEO fuel types map to the same GridPath fuel name. |
 
 ---
 
@@ -207,30 +259,39 @@ gridpath_load_scenarios --database ./ra_toolkit_e2e.db --csv_path ./csvs_ra_tool
 |---|---|
 | **Inputs** | `./ra_toolkit_e2e.db` (populated database from step 6) |
 | | `./csvs_ra_toolkit_e2e/scenarios.csv` |
-| **Outputs** | Two scenarios registered in the `scenarios` table |
+| **Outputs** | Three scenarios registered in the `scenarios` table |
 | **Notes** | `scenarios.csv` defines which subscenario IDs to combine for each scenario. This step is separate from `gridpath_load_csvs` and must be run after it. |
 
 **Scenarios created:**
 
-| Scenario | Temporal ID | Description |
-|---|---|---|
-| `ra_toolkit_e2e_monte_carlo` | 17 | Stochastic weather draws |
-| `ra_toolkit_e2e_sync` | 26 | Synchronized 28-subproblem run |
+| Scenario | Temporal ID | Iterations | Description |
+|---|---|---|---|
+| `ra_toolkit_e2e_test` | 27 | 4 (2w × 2h) | Quick validation run |
+| `ra_toolkit_e2e_sync` | 26 | 28 (14w × 2h) | Full synchronized run |
+| `ra_toolkit_e2e_monte_carlo` | 17 | varies | Stochastic weather draws |
 
 ---
 
 ### Step 8: Run End-to-End
 
+Start with the test scenario to validate the setup, then run the full scenario.
+
+**Test run (4 iterations, ~25 min with Gurobi):**
 ```bash
-gridpath_run_e2e --database ./ra_toolkit_e2e.db --scenario ra_toolkit_e2e_sync --solver cbc
+gridpath_run_e2e --database ./ra_toolkit_e2e_io.db --scenario ra_toolkit_e2e_test --solver gurobi --n_parallel_solve 2
+```
+
+**Full run (28 iterations, ~1.5h with Gurobi):**
+```bash
+gridpath_run_e2e --database ./ra_toolkit_e2e_io.db --scenario ra_toolkit_e2e_sync --solver gurobi --n_parallel_solve 2
 ```
 
 | | |
 |---|---|
-| **Inputs** | `./ra_toolkit_e2e.db` (database with scenarios loaded) |
-| **Outputs** | `./scenarios/ra_toolkit_e2e_sync/` (results directory) |
-| | Results imported back into `ra_toolkit_e2e.db` |
-| **Notes** | Runs four phases: get_inputs, run_scenario, import_results, process_results. Each subproblem takes ~15-20 minutes with CBC (model build + solve). 28 subproblems total. Use `--solver gurobi` or `--solver cplex` for significantly faster solves. |
+| **Inputs** | `./ra_toolkit_e2e_io.db` (database with scenarios loaded) |
+| **Outputs** | `../scenarios/ra_toolkit_e2e_test/` or `../scenarios/ra_toolkit_e2e_sync/` (results directory) |
+| | Results imported back into `ra_toolkit_e2e_io.db` |
+| **Notes** | Runs four phases: get_inputs, run_scenario, import_results, process_results. Each iteration takes ~6 min with Gurobi (barrier + crossover) or ~15-20 min with CBC. **`--n_parallel_solve` is required** — see [Memory Management](#memory-management). |
 
 **E2E phases:**
 1. **get_inputs** — extracts scenario inputs from the database into per-subproblem CSV directories
@@ -290,8 +351,9 @@ maps to GridPath's modeling framework.
 | `weather/user_defined_monte_carlo_timeseries.csv` | Monte Carlo draw configuration |
 | `weather/user_defined_monte_carlo_weather_bins.csv` | Weather bin definitions for stochastic draws |
 | `temporal/temporal_scenarios.csv` | Temporal scenario definitions (base CSVs, iterations) |
-| `temporal/iterations/iterations_sync_full.csv` | 28-subproblem iteration definitions (14 weather × 2 hydro years) |
-| `temporal/base_csvs/ra_toolkit_full/` | Base temporal CSVs with day + month horizons for the full sync scenario |
+| `temporal/iterations/iterations_sync_test.csv` | Test iteration definitions (2 weather × 2 hydro = 4 iterations) |
+| `temporal/iterations/iterations_sync_full.csv` | Full iteration definitions (14 weather × 2 hydro = 28 iterations) |
+| `temporal/base_csvs/ra_toolkit_full/` | Base temporal CSVs with day + month horizons (shared by test and full) |
 
 ---
 
@@ -379,17 +441,68 @@ project_portfolio_scenario_id,23,23
 
 ---
 
+## Memory Management
+
+Each full-year hourly model instance (8,760 timepoints × 249 projects) consumes
+~18 GB of Python memory with Gurobi (may be higher with CBC). Running multiple
+iterations sequentially in a single process causes memory to accumulate because
+CPython's memory allocator does not return freed memory to the OS between
+iterations.
+
+**Always use `--n_parallel_solve N`** for multi-iteration runs. This spawns N
+child processes that each solve a subset of iterations and release all memory on
+exit. Despite the flag name referencing "subproblems", GridPath's parallelization
+distributes all (iteration × subproblem) combinations across workers.
+
+| Machine RAM | Recommended `--n_parallel_solve` | Approx. peak memory |
+|---|---|---|
+| 64 GB | 2 | ~36 GB |
+| 64 GB | 3 | ~54 GB (tight) |
+| 128 GB+ | 4+ | ~18 GB × N |
+
+Without `--n_parallel_solve`, memory will grow with each iteration until the
+process is killed by the OS or pushed into swap.
+
+---
+
+## Weather and Hydro Year Coverage
+
+**Weather years** (14 total: 2007–2020) come from EIA-930 hourly interchange and
+the RA Toolkit load/variable generation profiles. Each weather year provides a
+distinct set of hourly load shapes and wind/solar capacity factors for every
+balancing authority. Weather year 2006 is excluded due to missing wind profile
+data.
+
+**Hydro years** (2 total: 2015 and 2019) come from
+`raw_data_project_hydro_opchars_by_year_month`, which contains monthly power
+fractions for BA-aggregated hydro projects. Only two years are available in the
+current dataset — this is a data availability limitation, not a design choice.
+Expanding hydro coverage would require building an aggregation pipeline from
+EIA-923 plant-level monthly generation to BA-level power fractions.
+
+The **test** scenario uses a 2×2 subset (weather 2015/2019 × hydro 2015/2019)
+for fast iteration during development. The **full** sync scenario crosses all 14
+weather years with both hydro years (14 × 2 = 28 iterations).
+
+Iteration cross-products are defined in the `iterations_sync_*.csv` files. The
+`loop` keyword means each column cycles through its values independently; the
+`ordered` keyword on the availability column assigns a sequential ID to each
+combination.
+
+---
+
 ## Experiment Configuration
 
 The `ra_toolkit_e2e_sync` scenario is configured as follows:
 
 - **Study year**: 2026
-- **Temporal resolution**: 8,760 hourly timepoints per subproblem
-- **Subproblems**: 28 total
-  - 14 weather years (2007-2020) x 2 hydro years (2015 driest, 2019 wettest)
-  - Each subproblem has a unique availability iteration (Monte Carlo outage
-    draw)
-  - Weather year 2006 is excluded due to missing wind profile data
+- **Temporal resolution**: 8,760 hourly timepoints per iteration (full year,
+  single subproblem — no monthly decomposition)
+- **Iterations**: 28 total
+  - 14 weather years (2007–2020) × 2 hydro years (2015, 2019)
+  - Each iteration has a unique availability draw (Monte Carlo outage sequence)
+  - See [Weather and Hydro Year Coverage](#weather-and-hydro-year-coverage) for
+    details on data sources and limitations
 - **Horizons**: 365 day horizons + 12 month horizons (both circular)
 - **Hydro balancing**: Monthly (hydro energy budgets enforced per calendar
   month, not per day)
@@ -400,7 +513,7 @@ The `ra_toolkit_e2e_sync` scenario is configured as follows:
 
 ### Reliability Metrics
 
-After all 28 subproblems solve, GridPath computes:
+After all iterations solve, GridPath computes:
 
 - **LOLE** (Loss of Load Expectation) — expected days per year with any
   unserved energy
@@ -408,3 +521,30 @@ After all 28 subproblems solve, GridPath computes:
 - **EUE** (Expected Unserved Energy) — expected MWh per year of unserved load
 - **LOLP** (Loss of Load Probability) — fraction of subproblems with any
   unserved energy
+
+---
+
+## Validating Your Results
+
+After running the test scenario (`ra_toolkit_e2e_test`), check that all 4
+iterations solved optimally. From the `db/` directory:
+
+```bash
+find ../scenarios/ra_toolkit_e2e_test -name "termination_condition.txt" -exec cat {} \;
+```
+
+All 4 should print `optimal`. The objective function values (NPV, $) should be:
+
+| Iteration | Weather | Hydro | Expected Objective |
+|---|---|---|---|
+| 1 | 2015 | 2015 | -371,652,903 |
+| 2 | 2015 | 2019 | -364,366,380 |
+| 3 | 2019 | 2015 | -399,000,464 |
+| 4 | 2019 | 2019 | -393,276,364 |
+
+Values may differ slightly depending on solver and tolerances but should be
+within 0.1%. The 2019 weather year iterations have higher costs (more negative)
+because 2019 had higher load and less favorable renewable generation.
+
+If any iteration shows `infeasible`, check that step 4b post-processing ran
+successfully — missing fuel nulling is the most common cause of infeasibility.

@@ -24,6 +24,7 @@ import argparse
 from csv import reader, writer
 import datetime
 import dill
+import gc
 import json
 from multiprocessing import get_context, Manager
 import os.path
@@ -441,6 +442,7 @@ def run_optimization_for_subproblem(
             multi_stage,
             parsed_arguments,
         )
+        gc.collect()
 
 
 def run_optimization_for_subproblem_pool(pool_datum):

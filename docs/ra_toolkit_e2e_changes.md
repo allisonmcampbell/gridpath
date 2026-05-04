@@ -118,5 +118,48 @@ conflict with existing ID 19 in `csvs_test_examples`)
   timepoints)
 - Generated via Monte Carlo unit outage simulation
 
+### Test scenario temporal config
+
+**`db/csvs_test_examples/raw_data_ra_toolkit_e2e/temporal/iterations/iterations_sync_test.csv`** (new)
+- 4-iteration subset: weather 2015/2019 × hydro 2015/2019
+- Uses the same base temporal CSVs as the full sync scenario
+- Registered as temporal_scenario_id 27 in `temporal_scenarios.csv`
+
+**`db/csvs_test_examples/raw_data_ra_toolkit_e2e/temporal/temporal_scenarios.csv`** (updated)
+- Added row for temporal_scenario_id 27 (`ra_toolkit_test`)
+
+**`db/csvs_ra_toolkit_e2e/scenarios.csv`** (updated)
+- Added column for `ra_toolkit_e2e_test` scenario
+
+### Post-processing scripts
+
+**`db/postprocess_raw_data_headers.py`** (new)
+- Renames v2025 column headers in raw data CSVs to v2026 names
+  (`load_zone_unit`→`unit`, `load_mw`→`value`, `cap_factor`→`value`)
+- Safe to re-run: skips files that already have correct headers
+- Replaces manual header editing prerequisite from earlier versions of this guide
+
+**`db/postprocess_opchar.py`** (new)
+- Fixes opchar sub-subscenario IDs: hydro 1→5, var gen profile 1→3
+- Nulls `project_fuel_scenario_id` for 56 biomass/nuclear projects that have
+  no corresponding fuel price file (prevents FK violations at DB load)
+- Must run after step 4 and before step 5
+
+**`db/postprocess_fuel_prices.py`** (new)
+- Deduplicates Oil fuel prices where multiple AEO fuel types map to the same
+  GridPath fuel name
+- Keeps the highest-price (non-zero) row per (fuel, period, month)
+- Must run after step 4 and before step 5
+
+### Core engine change
+
+**`gridpath/run_scenario.py`**
+- Added `import gc` and `gc.collect()` after each subproblem/stage solve in
+  `run_optimization_for_subproblem()`. Forces Python's cyclic garbage collector
+  to free Pyomo model instances between iterations. Helps within each worker
+  process when using `--n_parallel_solve`, but is not sufficient on its own —
+  `--n_parallel_solve` is required for multi-iteration runs to avoid memory
+  exhaustion (CPython's allocator does not return freed memory to the OS).
+
 ### `.gitignore`
 - Added `claude_chat.py` and `claude_history.json`

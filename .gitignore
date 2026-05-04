@@ -118,3 +118,6 @@ __MACOSX
 **/*.db
 **/*.db-shm
 **/*.db-wal
+
+# ignore claude stuff
+.knowledge

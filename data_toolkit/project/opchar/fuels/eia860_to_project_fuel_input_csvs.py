@@ -63,6 +63,7 @@ from data_toolkit.project.project_data_filters_common import (
     get_eia860_sql_filter_string,
     FUEL_FILTER_STR,
     DISAGG_PROJECT_NAME_STR,
+    AGG_PROJECT_NAME_STR,
 )
 
 
@@ -87,6 +88,12 @@ def parse_arguments(args):
     parser.add_argument("-fuel_id", "--project_fuel_scenario_id", default=1)
     parser.add_argument("-fuel_name", "--project_fuel_scenario_name", default="base")
 
+    parser.add_argument(
+        "--aggregate_projects",
+        default=False,
+        action="store_true",
+    )
+
     parser.add_argument("-q", "--quiet", default=False, action="store_true")
 
     parsed_arguments = parser.parse_known_args(args=args)[0]
@@ -103,21 +110,30 @@ def get_project_fuels(
     csv_location,
     subscenario_id,
     subscenario_name,
+    aggregate_projects=False,
 ):
+
+    project_name_str = (
+        AGG_PROJECT_NAME_STR
+        if aggregate_projects
+        else disagg_project_name_str
+    )
+    group_by = "GROUP BY project, fuel" if aggregate_projects else ""
 
     # Only coal, gas, and fuel oil for now (with aeo prices)
     sql = f"""
-        SELECT {disagg_project_name_str} AS project, 
+        SELECT {project_name_str} AS project,
             gridpath_generic_fuel || '_' || fuel_region as fuel
         FROM raw_data_eia860_generators
         JOIN user_defined_eia_gridpath_key ON
-            raw_data_eia860_generators.prime_mover_code = 
+            raw_data_eia860_generators.prime_mover_code =
             user_defined_eia_gridpath_key.prime_mover_code
             AND energy_source_code_1 = energy_source_code
         JOIN user_defined_baa_key ON (balancing_authority_code_eia = baa)
         WHERE 1 = 1
         AND {eia860_sql_filter_string}
         AND {fuel_filter_str}
+        {group_by}
         """
 
     c = conn.cursor()
@@ -159,6 +175,7 @@ def main(args=None):
         csv_location=parsed_args.output_directory,
         subscenario_id=parsed_args.project_fuel_scenario_id,
         subscenario_name=parsed_args.project_fuel_scenario_name,
+        aggregate_projects=parsed_args.aggregate_projects,
     )
 
     conn.close()
